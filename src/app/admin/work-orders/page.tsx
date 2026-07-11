@@ -50,6 +50,7 @@ export default async function WorkOrderBoardPage({
     status?: string;
     priority?: string;
     category?: string;
+    tenancy?: string;
     sort?: string;
     notice?: string;
     error?: string;
@@ -90,6 +91,9 @@ export default async function WorkOrderBoardPage({
   if (propertyFilter) filtered = filtered.filter((r) => r.wo.unit.propertyId === propertyFilter);
   if (priorityFilter) filtered = filtered.filter((r) => r.effective === priorityFilter);
   if (categoryFilter) filtered = filtered.filter((r) => r.wo.category === categoryFilter);
+  // Deep-link filter from the tenancies hub (/admin/tenancies/[id]).
+  const tenancyFilter = searchParams.tenancy;
+  if (tenancyFilter) filtered = filtered.filter((r) => r.wo.tenancyId === tenancyFilter);
 
   // ── Sort ───────────────────────────────────────────────────────────────────
   const sorted = [...filtered].sort((a, b) => {
@@ -109,7 +113,8 @@ export default async function WorkOrderBoardPage({
   });
 
   const hasFilters =
-    Boolean(propertyFilter || priorityFilter || categoryFilter) || statusParam !== 'open';
+    Boolean(propertyFilter || priorityFilter || categoryFilter || tenancyFilter) ||
+    statusParam !== 'open';
 
   return (
     <div>
