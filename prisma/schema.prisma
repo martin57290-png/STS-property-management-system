@@ -1,0 +1,764 @@
+// STS Property Management Systems — data model
+// PostgreSQL via Prisma. Money is stored as integer cents throughout.
+// All timestamps are UTC in the database; render in America/Los_Angeles.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Users & auth ────────────────────────────────────────────────────────────
+
+enum Role {
+  LANDLORD
+  TENANT
+  APPLICANT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?
+  name         String
+  phone        String?
+  role         Role     @default(TENANT)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenancies              TenancyTenant[]
+  applications           Application[]
+  notifications          Notification[]
+  notificationPreference NotificationPreference?
+  workOrdersCreated      WorkOrder[]             @relation("WorkOrderCreatedBy")
+  workOrderComments      WorkOrderComment[]
+  auditLogs              AuditLog[]
+  autopayEnrollments     AutopayEnrollment[]
+  documentsUploaded      Document[]              @relation("DocumentUploadedBy")
+  applicationNotes       ApplicationNote[]
+}
+
+// ─── Properties & units ──────────────────────────────────────────────────────
+
+model Property {
+  id        String   @id @default(cuid())
+  name      String
+  street    String
+  city      String
+  state     String   @default("CA")
+  zip       String
+  yearBuilt Int? // pre-1978 triggers lead-paint disclosure
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  units     Unit[]
+  documents Document[]
+}
+
+model Unit {
+  id                 String   @id @default(cuid())
+  propertyId         String
+  unitNumber         String
+  bedrooms           Int
+  bathrooms          Float
+  sqft               Int?
+  marketRentCents    Int
+  depositCents       Int
+  isListed           Boolean  @default(false) // accepting applications
+  applianceInventory Json? // [{name, brand, model, condition}]
+  photos             Json? // [storageKey]
+  notes              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  property     Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenancies    Tenancy[]
+  applications Application[]
+  documents    Document[]
+  workOrders   WorkOrder[]
+
+  @@unique([propertyId, unitNumber])
+}
+
+// ─── Module 1: Rental applications ──────────────────────────────────────────
+
+enum ApplicationStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  DENIED
+  WAITLISTED
+}
+
+model Application {
+  id     String            @id @default(cuid())
+  unitId String
+  status ApplicationStatus @default(DRAFT)
+  // Public status-tracking link token (applicant portal requires no login).
+  trackingToken String @unique @default(cuid())
+
+  // Primary applicant
+  firstName   String
+  lastName    String
+  email       String
+  phone       String
+  dateOfBirth DateTime?
+
+  // Household
+  monthlyIncomeCents Int?
+  moveInDate         DateTime?
+
+  // FCRA screening consent (written authorization capture)
+  screeningConsentAt DateTime?
+  screeningConsentIp String?
+  screeningConsentName String? // typed legal name as signature
+
+  // CA application fee (Civ. Code § 1950.6)
+  feeCents        Int?
+  feePaidAt       DateTime?
+  feePaymentRef   String? // provider payment id
+  feeReceiptKey   String? // storage key of generated itemized receipt PDF
+
+  decisionAt   DateTime?
+  decisionNote String?
+
+  // Optional link to a user account (applicant may register later)
+  userId String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  submittedAt DateTime?
+
+  unit         Unit                     @relation(fields: [unitId], references: [id])
+  user         User?                    @relation(fields: [userId], references: [id])
+  coApplicants ApplicationCoApplicant[]
+  residences   ApplicationResidence[]
+  employments  ApplicationEmployment[]
+  vehicles     ApplicationVehicle[]
+  pets         ApplicationPet[]
+  references   ApplicationReference[]
+  emergencyContacts ApplicationEmergencyContact[]
+  notes        ApplicationNote[]
+  documents    Document[]
+  lease        Lease?
+
+  @@index([unitId, status])
+}
+
+model ApplicationCoApplicant {
+  id            String      @id @default(cuid())
+  applicationId String
+  firstName     String
+  lastName      String
+  email         String?
+  phone         String?
+  relationship  String?
+  isOccupantOnly Boolean    @default(false) // occupant vs co-signer
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationResidence {
+  id             String      @id @default(cuid())
+  applicationId  String
+  isCurrent      Boolean     @default(false)
+  street         String
+  city           String
+  state          String
+  zip            String
+  monthlyRentCents Int?
+  moveIn         DateTime?
+  moveOut        DateTime?
+  landlordName   String?
+  landlordPhone  String?
+  landlordEmail  String?
+  reasonForLeaving String?
+  application    Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationEmployment {
+  id                 String      @id @default(cuid())
+  applicationId      String
+  isCurrent          Boolean     @default(true)
+  employer           String
+  position           String?
+  monthlyIncomeCents Int?
+  startDate          DateTime?
+  endDate            DateTime?
+  supervisorName     String?
+  supervisorPhone    String?
+  application        Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationVehicle {
+  id            String      @id @default(cuid())
+  applicationId String
+  make          String
+  model         String
+  year          Int?
+  color         String?
+  licensePlate  String?
+  state         String?
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationPet {
+  id            String      @id @default(cuid())
+  applicationId String
+  type          String // dog, cat, ...
+  breed         String?
+  name          String?
+  weightLbs     Int?
+  age           Int?
+  isServiceAnimal Boolean   @default(false)
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationReference {
+  id            String      @id @default(cuid())
+  applicationId String
+  name          String
+  relationship  String?
+  phone         String?
+  email         String?
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationEmergencyContact {
+  id            String      @id @default(cuid())
+  applicationId String
+  name          String
+  relationship  String?
+  phone         String
+  email         String?
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationNote {
+  id            String      @id @default(cuid())
+  applicationId String
+  authorId      String
+  body          String
+  createdAt     DateTime    @default(now())
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  author        User        @relation(fields: [authorId], references: [id])
+}
+
+// ─── Tenancies ───────────────────────────────────────────────────────────────
+
+enum TenancyStatus {
+  PENDING // approved, lease not yet signed / not moved in
+  ACTIVE
+  ENDED
+}
+
+model Tenancy {
+  id           String        @id @default(cuid())
+  unitId       String
+  status       TenancyStatus @default(PENDING)
+  startDate    DateTime
+  endDate      DateTime?
+  rentCents    Int
+  depositCents Int
+  rentDueDay   Int           @default(1) // day of month rent is due
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  unit                Unit                 @relation(fields: [unitId], references: [id])
+  tenants             TenancyTenant[]
+  leases              Lease[]
+  ledgerEntries       LedgerEntry[]
+  payments            Payment[]
+  inspections         Inspection[]
+  workOrders          WorkOrder[]
+  documents           Document[]
+  autopayEnrollments  AutopayEnrollment[]
+  depositDisposition  DepositDisposition?
+
+  @@index([unitId, status])
+}
+
+model TenancyTenant {
+  tenancyId String
+  userId    String
+  isPrimary Boolean @default(false)
+  tenancy   Tenancy @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  user      User    @relation(fields: [userId], references: [id])
+
+  @@id([tenancyId, userId])
+}
+
+// ─── Module 2: Lease generation ──────────────────────────────────────────────
+
+model LeaseTemplate {
+  id        String   @id @default(cuid())
+  name      String
+  body      String // template text with {{merge_fields}}
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leases Lease[]
+}
+
+enum LeaseStatus {
+  DRAFT
+  GENERATED // PDF produced, awaiting wet signature
+  EXECUTED // signed PDF uploaded
+  ACTIVE
+  EXPIRED
+  TERMINATED
+}
+
+model Lease {
+  id            String      @id @default(cuid())
+  tenancyId     String
+  templateId    String?
+  applicationId String?     @unique
+  status        LeaseStatus @default(DRAFT)
+
+  startDate    DateTime
+  endDate      DateTime
+  rentCents    Int
+  depositCents Int // CA AB 12: capped at one month's rent (enforced in form logic)
+  lateFeeCents Int?
+  lateFeeGraceDays Int?
+  utilitiesIncluded Json? // ["water", "trash", ...]
+  petTerms     String?
+  petRentCents Int?
+  additionalTerms String?
+
+  // CA disclosure checklist confirmed before generation:
+  // { leadPaint, bedBugs, mold, megansLaw, floodZone, ... : { required, confirmed } }
+  disclosures Json?
+
+  isRenewal       Boolean @default(false)
+  renewedFromId   String? @unique
+  renewedFrom     Lease?  @relation("LeaseRenewal", fields: [renewedFromId], references: [id])
+  renewedTo       Lease?  @relation("LeaseRenewal")
+
+  generatedPdfKey String? // merge-rendered, print-ready PDF
+  executedPdfKey  String? // uploaded wet-signed PDF
+  generatedAt     DateTime?
+  executedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenancy     Tenancy        @relation(fields: [tenancyId], references: [id])
+  template    LeaseTemplate? @relation(fields: [templateId], references: [id])
+  application Application?   @relation(fields: [applicationId], references: [id])
+  documents   Document[]
+
+  @@index([tenancyId, status])
+  @@index([endDate])
+}
+
+// ─── Module 3: Inspections ───────────────────────────────────────────────────
+
+enum InspectionType {
+  MOVE_IN
+  MOVE_OUT
+}
+
+enum InspectionStatus {
+  SCHEDULED
+  IN_PROGRESS
+  PENDING_SIGNATURES
+  COMPLETED
+}
+
+enum ItemCondition {
+  NEW
+  GOOD
+  FAIR
+  POOR
+  DAMAGED
+}
+
+model Inspection {
+  id          String           @id @default(cuid())
+  tenancyId   String
+  type        InspectionType
+  status      InspectionStatus @default(SCHEDULED)
+  scheduledAt DateTime?
+  completedAt DateTime?
+
+  // Joint acknowledgement in-app
+  tenantAckAt    DateTime?
+  tenantAckName  String?
+  landlordAckAt  DateTime?
+  landlordAckName String?
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenancy Tenancy          @relation(fields: [tenancyId], references: [id])
+  items   InspectionItem[]
+
+  @@unique([tenancyId, type])
+}
+
+model InspectionItem {
+  id           String         @id @default(cuid())
+  inspectionId String
+  room         String // "Kitchen", "Bedroom 1", ...
+  item         String // "Walls", "Flooring", ...
+  condition    ItemCondition?
+  notes        String?
+  sortOrder    Int            @default(0)
+
+  inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  documents  Document[] // photos for this line item
+
+  @@index([inspectionId, room])
+}
+
+model DepositDisposition {
+  id        String   @id @default(cuid())
+  tenancyId String   @unique
+  depositCents Int
+  // 21-day itemized statement clock (Civ. Code § 1950.5(g))
+  moveOutDate  DateTime?
+  statementDueDate DateTime?
+  pdfKey    String?
+  finalizedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenancy    Tenancy              @relation(fields: [tenancyId], references: [id])
+  deductions DepositDeduction[]
+}
+
+model DepositDeduction {
+  id            String @id @default(cuid())
+  dispositionId String
+  category      String // "Cleaning", "Repairs", "Unpaid rent", ...
+  description   String
+  amountCents   Int
+  // References to move-out inspection photos supporting the deduction
+  photoKeys     Json? // [storageKey]
+
+  disposition DepositDisposition @relation(fields: [dispositionId], references: [id], onDelete: Cascade)
+}
+
+// ─── Module 4: Rent collection ───────────────────────────────────────────────
+
+enum LedgerEntryType {
+  CHARGE
+  PAYMENT
+  CREDIT
+}
+
+enum ChargeCategory {
+  RENT
+  LATE_FEE
+  UTILITY
+  DEPOSIT
+  APPLICATION_FEE
+  OTHER
+}
+
+model LedgerEntry {
+  id        String          @id @default(cuid())
+  tenancyId String
+  type      LedgerEntryType
+  category  ChargeCategory  @default(OTHER)
+  // Positive cents. CHARGE increases the balance owed; PAYMENT and CREDIT reduce it.
+  amountCents Int
+  description String
+  effectiveDate DateTime @default(now())
+  paymentId  String?
+  createdAt  DateTime @default(now())
+
+  tenancy Tenancy  @relation(fields: [tenancyId], references: [id])
+  payment Payment? @relation(fields: [paymentId], references: [id])
+
+  @@index([tenancyId, effectiveDate])
+}
+
+enum PaymentMethod {
+  ACH
+  CARD
+}
+
+enum PaymentStatus {
+  PENDING // initiated
+  PROCESSING // e.g. ACH clearing
+  SUCCEEDED
+  FAILED
+  RETURNED // ACH returned after initial success
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  tenancyId   String
+  amountCents Int
+  method      PaymentMethod
+  status      PaymentStatus @default(PENDING)
+  providerId  String?       @unique // Stripe PaymentIntent id / mock id
+  failureReason String?
+  isAutopay   Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  tenancy       Tenancy       @relation(fields: [tenancyId], references: [id])
+  ledgerEntries LedgerEntry[]
+
+  @@index([tenancyId, status])
+}
+
+model AutopayEnrollment {
+  id         String   @id @default(cuid())
+  tenancyId  String
+  userId     String
+  dayOfMonth Int      @default(1)
+  method     PaymentMethod @default(ACH)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenancy Tenancy @relation(fields: [tenancyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([tenancyId, userId])
+}
+
+// ─── Module 5: Work orders ───────────────────────────────────────────────────
+
+enum WorkOrderCategory {
+  PLUMBING
+  ELECTRICAL
+  HVAC
+  APPLIANCE
+  PEST
+  NO_HEAT
+  NO_WATER
+  SEWAGE
+  NO_ELECTRICITY
+  OTHER
+}
+
+enum WorkOrderPriority {
+  EMERGENCY
+  URGENT
+  ROUTINE
+  LOW
+}
+
+enum WorkOrderStatus {
+  SUBMITTED
+  ACKNOWLEDGED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CLOSED
+  CANCELLED
+}
+
+model WorkOrder {
+  id       String            @id @default(cuid())
+  number   Int               @unique @default(autoincrement())
+  unitId   String
+  tenancyId String?
+  createdById String?
+  category WorkOrderCategory
+  priority WorkOrderPriority @default(ROUTINE)
+  status   WorkOrderStatus   @default(SUBMITTED)
+  title    String
+  description String
+  // CA repair-and-deduct exposure: auto-tagged for habitability categories
+  isHabitability Boolean @default(false)
+
+  permissionToEnter Boolean @default(false)
+  preferredAccessTimes String?
+
+  vendorId  String?
+  scheduledFor DateTime?
+  costCents Int?
+
+  acknowledgedAt DateTime?
+  scheduledAt    DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  closedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  unit      Unit               @relation(fields: [unitId], references: [id])
+  tenancy   Tenancy?           @relation(fields: [tenancyId], references: [id])
+  createdBy User?              @relation("WorkOrderCreatedBy", fields: [createdById], references: [id])
+  vendor    Vendor?            @relation(fields: [vendorId], references: [id])
+  comments  WorkOrderComment[]
+  documents Document[] // tenant photos/videos + landlord completion photos
+
+  @@index([status, priority])
+  @@index([unitId])
+}
+
+model WorkOrderComment {
+  id          String   @id @default(cuid())
+  workOrderId String
+  authorId    String
+  body        String
+  visibleToTenant Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id])
+}
+
+model Vendor {
+  id        String   @id @default(cuid())
+  name      String
+  company   String?
+  phone     String?
+  email     String?
+  specialty String? // plumbing, electrical, ...
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  workOrders WorkOrder[]
+}
+
+// ─── Documents (private storage, signed URLs) ────────────────────────────────
+
+enum DocumentCategory {
+  GOVERNMENT_ID
+  PAY_STUB
+  BANK_STATEMENT
+  LEASE
+  EXECUTED_LEASE
+  DISCLOSURE
+  INSPECTION_PHOTO
+  WORK_ORDER_MEDIA
+  COMPLETION_PHOTO
+  RECEIPT
+  NOTICE
+  CORRESPONDENCE
+  DEPOSIT_DISPOSITION
+  UNIT_PHOTO
+  OTHER
+}
+
+model Document {
+  id           String           @id @default(cuid())
+  storageKey   String           @unique
+  filename     String
+  contentType  String
+  sizeBytes    Int
+  category     DocumentCategory @default(OTHER)
+  uploadedById String?
+
+  // Optional owner links (one or more may be set)
+  applicationId    String?
+  tenancyId        String?
+  leaseId          String?
+  unitId           String?
+  propertyId       String?
+  workOrderId      String?
+  inspectionItemId String?
+
+  createdAt DateTime @default(now())
+
+  uploadedBy     User?           @relation("DocumentUploadedBy", fields: [uploadedById], references: [id])
+  application    Application?    @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  tenancy        Tenancy?        @relation(fields: [tenancyId], references: [id])
+  lease          Lease?          @relation(fields: [leaseId], references: [id])
+  unit           Unit?           @relation(fields: [unitId], references: [id])
+  property       Property?       @relation(fields: [propertyId], references: [id])
+  workOrder      WorkOrder?      @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  inspectionItem InspectionItem? @relation(fields: [inspectionItemId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([tenancyId])
+  @@index([workOrderId])
+  @@index([inspectionItemId])
+}
+
+// ─── Notifications ───────────────────────────────────────────────────────────
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+  SKIPPED // suppressed by user preference
+}
+
+// Every event type the app notifies on (used for preference toggles too)
+enum NotificationEvent {
+  APPLICATION_RECEIVED
+  APPLICATION_STATUS_CHANGED
+  RENT_DUE_REMINDER
+  PAYMENT_RECEIVED
+  PAYMENT_FAILED
+  WORK_ORDER_STATUS_CHANGED
+  LEASE_EXPIRATION
+  INSPECTION_SCHEDULED
+  GENERAL
+}
+
+model Notification {
+  id      String              @id @default(cuid())
+  userId  String?
+  event   NotificationEvent   @default(GENERAL)
+  channel NotificationChannel
+  status  NotificationStatus  @default(QUEUED)
+  to      String // email address or phone number
+  subject String?
+  body    String
+  error   String?
+  sentAt  DateTime?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+}
+
+model NotificationPreference {
+  id     String @id @default(cuid())
+  userId String @unique
+  // { [NotificationEvent]: { email: boolean, sms: boolean } }
+  prefs  Json
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── Audit log ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String // e.g. "application.approved", "ledger.charge_added"
+  entityType String // "Application", "LedgerEntry", ...
+  entityId   String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ─── App settings (landlord-configurable) ────────────────────────────────────
+
+model AppSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
