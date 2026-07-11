@@ -7,9 +7,9 @@ import type { CreatePaymentResult, NormalizedPaymentEvent, PaymentProvider } fro
  * Behavior:
  * - Card payments succeed synchronously.
  * - ACH payments land in PROCESSING; the admin "payment simulator"
- *   (/admin/dev/payments) posts simulated webhook events to
- *   /api/webhooks/payments to clear, fail, or return them — exercising the
- *   same reconciliation path a real Stripe webhook would.
+ *   (/admin/payments/simulator) applies simulated webhook events through the
+ *   same reconciliation path a real Stripe webhook would (see
+ *   /api/webhooks/payments).
  */
 export class MockPaymentProvider implements PaymentProvider {
   async createPayment(params: {
