@@ -97,18 +97,25 @@ export function ResidenceStep({ app }: { app: ApplicationDetail }) {
           <SubmitButton variant="secondary" pendingText="Adding…">
             + Add address
           </SubmitButton>
+
+          {/* Inside the same form so a filled-in address is saved
+              automatically on Continue; formNoValidate lets Continue work
+              with empty fields once an address has already been added. */}
+          <StepNav
+            token={token}
+            back="household"
+            next={
+              <SubmitButton
+                formAction={continueFromResidence.bind(null, token)}
+                formNoValidate
+                pendingText="Saving…"
+              >
+                Continue →
+              </SubmitButton>
+            }
+          />
         </form>
       </Card>
-
-      <StepNav
-        token={token}
-        back="household"
-        next={
-          <form action={continueFromResidence.bind(null, token)}>
-            <SubmitButton pendingText="Checking…">Continue →</SubmitButton>
-          </form>
-        }
-      />
     </div>
   );
 }

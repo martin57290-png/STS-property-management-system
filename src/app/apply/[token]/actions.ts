@@ -122,8 +122,12 @@ export async function removeCoApplicant(token: string, formData: FormData): Prom
 
 // ─── Step 3: residence history ───────────────────────────────────────────────
 
-export async function addResidence(token: string, formData: FormData): Promise<void> {
-  const app = await requireDraft(token);
+/** Persist the "Add an address" form fields as a residence row. */
+async function createResidenceFromForm(
+  app: { id: string },
+  token: string,
+  formData: FormData,
+): Promise<void> {
   const street = str(formData, 'street');
   const city = str(formData, 'city');
   const state = str(formData, 'state');
@@ -156,6 +160,11 @@ export async function addResidence(token: string, formData: FormData): Promise<v
       reasonForLeaving: strOrNull(formData, 'reasonForLeaving'),
     },
   });
+}
+
+export async function addResidence(token: string, formData: FormData): Promise<void> {
+  const app = await requireDraft(token);
+  await createResidenceFromForm(app, token, formData);
   backTo(token, 'residence');
 }
 
@@ -168,8 +177,19 @@ export async function removeResidence(token: string, formData: FormData): Promis
 }
 
 /** Residence step requires at least the current address before continuing. */
-export async function continueFromResidence(token: string): Promise<void> {
+export async function continueFromResidence(token: string, formData: FormData): Promise<void> {
   const app = await requireDraft(token);
+
+  // If the applicant filled in the "Add an address" form and hit Continue
+  // without tapping "+ Add address" first, save it for them rather than
+  // bouncing them back with an error.
+  const hasTypedAddress = Boolean(
+    str(formData, 'street') || str(formData, 'city') || str(formData, 'zip'),
+  );
+  if (hasTypedAddress) {
+    await createResidenceFromForm(app, token, formData);
+  }
+
   const current = await prisma.applicationResidence.findFirst({
     where: { applicationId: app.id, isCurrent: true },
   });
